@@ -1,0 +1,147 @@
+# Codex 리뷰 → Claude 자동 수정 요청 (PR당 최대 1회)
+#
+# Codex(chatgpt-codex-connector[bot])가 main 대상 PR에 리뷰를 제출하면
+#   1) 리뷰 작성자, 대상 커밋(최신 HEAD), 대상 브랜치, 저장소, 라벨을 검증하고
+#   2) ai-autofix-requested 라벨을 붙인 뒤
+#   3) Claude Code 예약 작업(Routine)의 API 트리거를 한 번 호출한다.
+#
+# - AI 모델을 실행하지 않는다. GitHub API 조회와 HTTP 호출 1회뿐이다.
+# - Fire URL과 토큰은 GitHub Actions Secrets에서만 읽는다.
+# - 호출이 실패해도 재시도하지 않는다. /fire는 멱등이 아니어서 재시도하면 세션이 중복 생성된다.
+# - 공개 저장소에서 표준 러너(ubuntu-latest)는 무료다.
+# 설정 방법: docs/ai-collab/SETUP.md
+
+name: codex-to-claude
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  issues: write         # 라벨 생성·부착, PR 코멘트 작성
+  pull-requests: write  # PR·리뷰 조회
+
+concurrency:
+  # 같은 PR의 리뷰 이벤트는 하나씩 처리해 중복 호출을 막는다.
+  group: codex-to-claude-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  request-claude-autofix:
+    # 1차 필터: 봇 계정의 리뷰, main 대상, 같은 저장소의 PR일 때만 러너를 띄운다.
+    # Codex 봇 여부와 나머지 조건은 아래 스크립트가 GitHub API로 다시 확인한다.
+    if: >-
+      github.event.review.user.type == 'Bot' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify Codex review and request Claude autofix
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_ID: ${{ github.event.review.id }}
+          REVIEW_COMMIT: ${{ github.event.review.commit_id }}
+          REVIEW_URL: ${{ github.event.review.html_url }}
+          CODEX_BOT_LOGIN: ${{ vars.CODEX_BOT_LOGIN || 'chatgpt-codex-connector[bot]' }}
+          AUTOFIX_LABEL: ai-autofix-requested
+          FIRED_MARKER: "<!-- codex-to-claude:fired -->"
+          ROUTINE_FIRE_URL: ${{ secrets.CLAUDE_ROUTINE_FIRE_URL }}
+          ROUTINE_FIRE_TOKEN: ${{ secrets.CLAUDE_ROUTINE_FIRE_TOKEN }}
+          ANTHROPIC_VERSION: "2023-06-01"
+          ANTHROPIC_BETA: experimental-cc-routine-2026-04-01
+        run: |
+          set -euo pipefail
+
+          note() { echo "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          skip() {
+            echo "건너뜀: $*"
+            note "### codex-to-claude: 건너뜀"
+            note "- 사유: $*"
+            exit 0
+          }
+
+          # 0) 이벤트 값 형식 확인
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || skip "PR 번호 형식 오류"
+          [[ "$REVIEW_ID" =~ ^[0-9]+$ ]] || skip "리뷰 ID 형식 오류"
+          [[ "$REVIEW_COMMIT" =~ ^[0-9a-f]{40}$ ]] || skip "리뷰 커밋 SHA 형식 오류"
+
+          # 1) 리뷰 작성자가 공식 Codex 봇인지 API로 다시 확인
+          review_json="$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews/$REVIEW_ID")"
+          author="$(jq -r '.user.login' <<<"$review_json")"
+          [[ "$(jq -r '.user.type' <<<"$review_json")" == "Bot" && "$author" == "$CODEX_BOT_LOGIN" ]] \
+            || skip "리뷰 작성자($author)가 Codex 봇($CODEX_BOT_LOGIN)이 아님"
+          [[ "$(jq -r '.commit_id' <<<"$review_json")" == "$REVIEW_COMMIT" ]] || skip "리뷰 커밋이 이벤트 값과 다름"
+
+          # 2) PR 최신 상태: 열림, main 대상, 같은 저장소, 최신 HEAD에 대한 리뷰
+          pr_json="$(gh api "repos/$REPO/pulls/$PR_NUMBER")"
+          head_sha="$(jq -r '.head.sha' <<<"$pr_json")"
+          head_ref="$(jq -r '.head.ref' <<<"$pr_json")"
+          [[ "$(jq -r '.state' <<<"$pr_json")" == "open" ]] || skip "PR이 열려 있지 않음"
+          [[ "$(jq -r '.base.ref' <<<"$pr_json")" == "main" ]] || skip "main 대상 PR이 아님"
+          [[ "$(jq -r '.head.repo.full_name // ""' <<<"$pr_json")" == "$REPO" ]] || skip "같은 저장소에서 만든 PR이 아님"
+          [[ "$head_sha" == "$REVIEW_COMMIT" ]] || skip "최신 HEAD($head_sha)에 대한 리뷰가 아님"
+
+          # 3) PR당 1회: 라벨이나 요청 기록 코멘트가 있으면 중단
+          if jq -e --arg l "$AUTOFIX_LABEL" 'any(.labels[]?; .name == $l)' <<<"$pr_json" >/dev/null; then
+            skip "'$AUTOFIX_LABEL' 라벨이 이미 있음 (PR당 1회)"
+          fi
+          fired="$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+            | jq -s --arg m "$FIRED_MARKER" \
+                '[.[][] | select(.user.login == "github-actions[bot]" and ((.body // "") | contains($m)))] | length')"
+          [[ "$fired" -eq 0 ]] || skip "이미 자동 수정을 요청한 기록이 있음 (PR당 1회)"
+
+          # 4) 실제 지적(인라인 코멘트)이 있는 리뷰만 처리
+          findings="$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews/$REVIEW_ID/comments" \
+            | jq -s '[.[][]] | length')"
+          [[ "$findings" -ge 1 ]] || skip "리뷰에 인라인 지적이 없음"
+
+          # 5) Secrets 확인. 값은 출력하지 않는다.
+          if [[ -z "${ROUTINE_FIRE_URL:-}" || -z "${ROUTINE_FIRE_TOKEN:-}" ]]; then
+            echo "::warning::CLAUDE_ROUTINE_FIRE_URL 또는 CLAUDE_ROUTINE_FIRE_TOKEN 시크릿이 없어 요청하지 않았습니다."
+            skip "Routine 시크릿 미설정"
+          fi
+          if [[ ! "$ROUTINE_FIRE_URL" =~ ^https://api\.anthropic\.com/v1/claude_code/routines/trig_[A-Za-z0-9_-]+/fire$ ]]; then
+            echo "::error::CLAUDE_ROUTINE_FIRE_URL이 Routine Fire URL 형식이 아닙니다. 토큰을 보내지 않고 중단합니다."
+            exit 1
+          fi
+
+          # 6) 호출 전에 라벨부터 붙인다. 이후 단계가 실패해도 이 PR에서 다시 실행되지 않는다.
+          gh api -X POST "repos/$REPO/labels" -f name="$AUTOFIX_LABEL" -f color="5319e7" \
+            -f description="Codex 리뷰 기반 Claude 자동 수정 요청됨 (PR당 1회)" >/dev/null 2>&1 || true
+          gh api -X POST "repos/$REPO/issues/$PR_NUMBER/labels" -f "labels[]=$AUTOFIX_LABEL" >/dev/null
+
+          # 7) Routine API 트리거 1회 호출 (재시도 없음)
+          payload="$(jq -n --arg repo "$REPO" --arg pr "$PR_NUMBER" --arg review "$REVIEW_ID" \
+            --arg sha "$head_sha" --arg branch "$head_ref" --arg url "$REVIEW_URL" \
+            '{text: (["source: codex-to-claude", "repository: \($repo)", "pr_number: \($pr)",
+                      "review_id: \($review)", "head_sha: \($sha)", "head_branch: \($branch)",
+                      "review_url: \($url)"] | join("\n"))}')"
+          umask 077
+          headers="$RUNNER_TEMP/routine-headers"
+          response="$RUNNER_TEMP/routine-response.json"
+          printf 'Authorization: Bearer %s\nanthropic-version: %s\nanthropic-beta: %s\nContent-Type: application/json\n' \
+            "$ROUTINE_FIRE_TOKEN" "$ANTHROPIC_VERSION" "$ANTHROPIC_BETA" > "$headers"
+          http_code="$(curl -sS -o "$response" -w '%{http_code}' --max-time 30 -X POST \
+            -H @"$headers" --data "$payload" "$ROUTINE_FIRE_URL")" || http_code="000"
+          rm -f "$headers"
+
+          if [[ "$http_code" == "200" ]]; then
+            session_url="$(jq -r '.claude_code_session_url // "(응답에 세션 주소 없음)"' "$response" 2>/dev/null || echo "(응답 해석 실패)")"
+            body="$(printf '%s\nCodex 리뷰(%s)를 받아 Claude 자동 수정을 1회 요청했습니다.\n\n- 대상 커밋: `%s`\n- Claude 세션: %s\n- 이 PR에서는 자동 수정을 다시 요청하지 않습니다 (`%s` 라벨).' \
+              "$FIRED_MARKER" "$REVIEW_URL" "$head_sha" "$session_url" "$AUTOFIX_LABEL")"
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
+            note "### codex-to-claude: Claude 자동 수정 요청 완료"
+            note "- PR #$PR_NUMBER, 리뷰 $REVIEW_ID, 커밋 $head_sha"
+            note "- 세션: $session_url"
+          else
+            err="$(jq -r '.error.type // "unknown"' "$response" 2>/dev/null || echo unknown)"
+            body="$(printf '<!-- codex-to-claude:failed -->\nClaude 자동 수정 요청이 실패했습니다 (HTTP %s, %s). 자동으로 다시 시도하지 않습니다.\n\n- Claude 웹의 예약 작업 기록에서 실제 실행 여부를 확인하세요.\n- 원인을 해결한 뒤 다시 요청하려면 `%s` 라벨을 지우고 Codex 리뷰를 다시 받으세요.' \
+              "$http_code" "$err" "$AUTOFIX_LABEL")"
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null || true
+            echo "::error::Claude Routine 호출 실패 (HTTP $http_code, $err). 재시도하지 않습니다."
+            exit 1
+          fi
