@@ -21,16 +21,27 @@ Codex가 PR에 리뷰를 남기면 GitHub Actions가 조건을 확인하고 Clau
 
 ## 직접 설정할 항목
 
-### 1. Claude (claude.ai/code/routines): 먼저 진행
+이 파일들이 main에 병합돼 있어야 워크플로가 동작한다. PR은 GitHub의 PR 화면에서 **Merge pull request** → **Confirm merge**로 병합한다.
 
-1. [Claude GitHub App](https://github.com/apps/claude)을 이 저장소에 설치한다. Repository access는 **Only select repositories**로 두고 `opic-coach-src`만 고른다. 설치가 없으면 Routine이 저장소를 읽을 수는 있어도 push와 Draft PR 생성은 거부된다.
-2. **New task**(또는 **New routine**) → **Set up manually**.
-3. 이름 `codex-autofix`, 지시문에는 [`claude-routine-prompt.md`](claude-routine-prompt.md)의 프롬프트 블록 전체를 붙여 넣는다.
-4. Advanced settings → Repository: `parkbusung/opic-coach-src`, Cloud environment: **Default**(Trusted 네트워크, 테스트용 패키지 설치 가능).
-5. 모델은 사용량을 아끼려면 Sonnet 계열을 고른다.
-6. Connectors 탭에서 커넥터를 모두 뺀다. GitHub 작업은 내장 GitHub 연결로 처리된다.
-7. Trigger에서 **API**를 고르고 **Create** → 한 번만 표시되는 토큰과 Fire URL을 복사한다.
-8. claude.ai/settings/usage에서 사용량 크레딧이 꺼져 있는지 확인한다.
+### 1. Claude 예약 작업: 먼저 진행
+
+Claude 채팅이 아니라 **Claude Code의 예약 작업**(Scheduled tasks, 이전 이름 Routines)에서 설정한다. 웹에서 [claude.ai/code/routines](https://claude.ai/code/routines)를 열거나, 데스크톱 앱 **Code** 탭 → 왼쪽 사이드바 **Scheduled**(안 보이면 **More** 메뉴 안)에서 연다. 한국어 화면에서는 아래 메뉴 이름이 번역돼 보일 수 있다.
+
+1. [Claude GitHub App](https://github.com/apps/claude)을 이 저장소에 설치한다. Repository access는 **Only select repositories**로 두고 `opic-coach-src`만 고른다. 설치가 없으면 작업이 저장소를 읽을 수는 있어도 push와 Draft PR 생성은 거부된다.
+2. 작업을 만들거나 연다.
+   - 이미 `codex-autofix` 작업이 있으면: 목록에서 작업을 누르고 이름 옆 메뉴 → **Edit**.
+   - 새로 만들면: **New task**(또는 **New routine**). **Create with Claude / Set up manually** 메뉴가 뜨면 **Set up manually**를, 데스크톱 앱에서 **Local / Cloud** 메뉴가 뜨면 **Cloud**를 고른다. Local 작업은 PC가 켜져 있어야 돌고 저장소·API 트리거 설정이 없다.
+3. 이름은 `codex-autofix`, 프롬프트(Instructions)에는 [`claude-routine-prompt.md`](claude-routine-prompt.md)의 프롬프트 블록 전체를 넣는다.
+4. 저장소와 실행 환경을 고른다.
+   - 대화 상자: 아래쪽 **Advanced settings**를 펼친다 → **General** 탭 → **Repository**에서 `parkbusung/opic-coach-src` → 그 아래 나타나는 **Cloud environment**는 **Default**(Trusted 네트워크, 테스트용 패키지 설치 가능).
+   - 전체 화면 양식: **Instructions** 입력란 안의 저장소·환경 선택 버튼에서 고른다.
+5. 모델은 프롬프트 입력란의 모델 선택기에서 고른다. 사용량을 아끼려면 Sonnet 계열, 상관없으면 그대로 둔다.
+6. **Advanced settings** → **Connectors** 탭(전체 화면 양식은 **Connectors** 항목)에서 목록의 커넥터를 모두 뺀다. 연결된 커넥터가 기본으로 전부 들어가며, GitHub 작업은 커넥터 없이 내장 연결로 처리된다.
+7. API 트리거와 토큰을 만든다.
+   - 새로 만들 때: **Trigger** 행에서 **API**를 고르고 **Create** → 뜨는 **API token** 창에서 토큰을 바로 복사한다(한 번만 표시).
+   - 기존 작업: **Edit** 창의 **Trigger** 행 끝 **+** → **API** → 나타난 패널에서 **Fire URL**을 복사하고 **Generate token** → **Token generated** 창의 토큰을 복사한다. 토큰은 만드는 즉시 적용된다.
+   - 저장소·환경·커넥터를 바꿨다면 마지막에 **Save changes**를 누른다.
+8. 웹이나 데스크톱 앱의 **설정 → 사용**(claude.ai/settings/usage)에서 **사용 크레딧**이 비활성인지, **자동 재충전**이 꺼져 있는지 확인한다. 꺼져 있으면 구독 한도에 닿았을 때 추가 요금 없이 실행이 멈춘다.
 
 ### 2. GitHub (저장소 Settings)
 
