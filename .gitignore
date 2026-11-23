@@ -1,0 +1,33 @@
+# --- 비밀값·인증 정보 ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+credentials*.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+
+# --- Node ---
+node_modules/
+
+# --- 로컬 설정·OS ---
+.claude/settings.local.json
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# --- 개인 학습 데이터 (공개 저장소) ---
+# 앱 폴더를 확인한 뒤 실제 폴더명으로 추가: 녹음, 모의고사 결과, 백업 파일, Claude 평가 파일
